@@ -1,1 +1,2 @@
 flask colorama
+Pip install colorama
