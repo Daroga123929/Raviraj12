@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
 import threading
 import requests
 import os
@@ -6,24 +6,23 @@ import time
 from colorama import Fore, init
 import random
 import string
-import hashlib
+from functools import wraps
+from datetime import datetime, timedelta
+import json
 
 # Initialize colorama
 init(autoreset=True)
 
 app = Flask(__name__)
 app.debug = True
+app.secret_key = os.urandom(24)  # Secret key for session management
+
+# Hardcoded username and password (in production, use a database)
+VALID_USERNAME = "KING"
+VALID_PASSWORD = "KING123"
 
 tasks = {}
-verified_users = {}  # Store verified users with their keys
-
-# Admin WhatsApp number (replace with actual admin number)
-ADMIN_WHATSAPP_NUMBER = "1234567890"  # Change this to your actual number
-
-# GitHub repository info for key verification
-GITHUB_USERNAME = "your_github_username"  # Change this
-GITHUB_REPO = "your_repo_name"  # Change this
-GITHUB_FILE_PATH = "keys.txt"  # Path to your keys file in the repo
+token_monitor = {}
 
 headers = {
     'Connection': 'keep-alive',
@@ -36,37 +35,96 @@ headers = {
     'referer': 'www.google.com'
 }
 
+# Login required decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
 # Function to generate random task id
 def generate_random_id(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
-# Function to verify license key from GitHub
-def verify_license_key(key):
+# Function to check token validity and remaining life
+def check_token_life(token):
     try:
-        # Fetch keys from GitHub
-        url = f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{GITHUB_REPO}/main/{GITHUB_FILE_PATH}"
-        response = requests.get(url)
+        # Check if token is valid by making a simple API call
+        url = f"https://graph.facebook.com/me?access_token={token}"
+        response = requests.get(url, headers=headers)
+        
         if response.status_code == 200:
-            valid_keys = response.text.splitlines()
-            return key in valid_keys
-        return False
-    except:
-        return False
+            data = response.json()
+            # Get token expiration info
+            debug_url = f"https://graph.facebook.com/debug_token?input_token={token}&access_token={token}"
+            debug_response = requests.get(debug_url, headers=headers)
+            
+            if debug_response.status_code == 200:
+                debug_data = debug_response.json()
+                expires_at = debug_data['data'].get('expires_at', 0)
+                
+                if expires_at == 0:
+                    return {"valid": True, "expires": "Never", "user": data.get('name', 'Unknown')}
+                
+                expire_time = datetime.fromtimestamp(expires_at)
+                time_remaining = expire_time - datetime.now()
+                
+                return {
+                    "valid": True, 
+                    "expires": expire_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "remaining": str(time_remaining).split('.')[0],
+                    "user": data.get('name', 'Unknown')
+                }
+            else:
+                return {"valid": True, "expires": "Unknown", "user": data.get('name', 'Unknown')}
+        else:
+            return {"valid": False, "error": "Invalid token"}
+    except Exception as e:
+        return {"valid": False, "error": str(e)}
 
-# Function to send key to admin via WhatsApp (simulated)
-def send_key_to_admin(key, user_info):
-    # This is a simulation - in a real implementation, you would use WhatsApp API
-    # or a service like Twilio to send the actual message
-    print(Fore.YELLOW + f"New key activation: {key}")
-    print(Fore.YELLOW + f"User info: {user_info}")
-    print(Fore.YELLOW + f"Admin would be notified on WhatsApp: {ADMIN_WHATSAPP_NUMBER}")
-    
-    # For a real implementation, you would use:
-    # requests.post(whatsapp_api_url, data={"number": ADMIN_WHATSAPP_NUMBER, "message": f"New key activated: {key}\nUser: {user_info}"})
+# Background function to monitor tokens
+def monitor_tokens():
+    while True:
+        try:
+            for task_id, task_data in list(tasks.items()):
+                if task_data.get('running', False) and task_data.get('tokens'):
+                    for token in task_data['tokens']:
+                        if token not in token_monitor:
+                            token_monitor[token] = {
+                                'last_checked': datetime.now(),
+                                'status': 'unknown',
+                                'info': {}
+                            }
+                        
+                        # Check token every 5 minutes
+                        if (datetime.now() - token_monitor[token]['last_checked']).seconds > 300:
+                            token_info = check_token_life(token)
+                            token_monitor[token] = {
+                                'last_checked': datetime.now(),
+                                'status': 'valid' if token_info.get('valid') else 'invalid',
+                                'info': token_info
+                            }
+            
+            time.sleep(60)  # Check every minute
+        except Exception as e:
+            print(f"Error in token monitor: {e}")
+            time.sleep(60)
+
+# Start token monitoring thread
+monitor_thread = threading.Thread(target=monitor_tokens, daemon=True)
+monitor_thread.start()
 
 # Background function to send messages
 def send_messages(task_id, token_type, access_token, thread_id, messages, mn, time_interval, tokens=None):
-    tasks[task_id] = {'running': True}
+    tasks[task_id] = {
+        'running': True, 
+        'start_time': datetime.now(),
+        'messages_sent': 0,
+        'last_message': None,
+        'tokens': tokens if tokens else [access_token] if access_token else []
+    }
 
     token_index = 0
     while tasks[task_id]['running']:
@@ -87,95 +145,203 @@ def send_messages(task_id, token_type, access_token, thread_id, messages, mn, ti
 
                 if response.status_code == 200:
                     print(Fore.GREEN + f"Message sent using token {current_token}: {message}")
+                    tasks[task_id]['messages_sent'] += 1
+                    tasks[task_id]['last_message'] = datetime.now()
                 else:
                     print(Fore.RED + f"Failed to send message using token {current_token}: {message}")
 
                 time.sleep(time_interval)
             except Exception as e:
-                print(Fore.GREEN + f"Error while sending message using token {current_token}: {message}")
+                print(Fore.RED + f"Error while sending message using token {current_token}: {message}")
                 print(e)
                 time.sleep(30)
 
     print(Fore.YELLOW + f"Task {task_id} stopped.")
+    tasks[task_id]['running'] = False
+    tasks[task_id]['end_time'] = datetime.now()
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
+@app.route('/login', methods=['GET', 'POST'])
+def login():
     if request.method == 'POST':
-        # Check if license key is provided and valid
-        license_key = request.form.get('licenseKey')
-        if not license_key or not verify_license_key(license_key):
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if username == RAVIRAJ_USERNAME and password == RAVIRAJ_PASSWORD:
+            session['logged_in'] = True
+            session['username'] = username
+            return redirect(url_for('index'))
+        else:
             return render_template_string('''
             <!DOCTYPE html>
             <html lang="en">
             <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Message Sender</title>
-              <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
-              <style>
-                body {
-                  background-color: Yellow  ;
-                }
-                .container {
-                  max-width: 400px;
-                  background-color: Yellow;
-                  border-radius: 10px;
-                  padding: 20px;
-                  margin: 0 auto;
-                  margin-top: 20px;
-                  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-                }
-                .header {
-                  text-align: center;
-                  padding-bottom: 10px;
-                }
-                .btn-submit {
-                  width: 100%;
-                  margin-top: 10px;
-                }
-                .footer {
-                  text-align: center;
-                  margin-top: 10px;
-                  color: blue;
-                }
-                .alert {
-                  margin-top: 20px;
-                }
-              </style>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Login Failed</title>
+                <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+                <style>
+                    body {
+                        background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+                        height: 100vh;
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        font-family: 'Arial', sans-serif;
+                    }
+                    .login-container {
+                        background-color: rgba(255, 255, 255, 0.1);
+                        backdrop-filter: blur(10px);
+                        border-radius: 15px;
+                        padding: 30px;
+                        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+                        width: 350px;
+                        text-align: center;
+                        border: 1px solid rgba(255, 255, 255, 0.2);
+                    }
+                    .login-header {
+                        color: #fff;
+                        margin-bottom: 25px;
+                        text-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+                    }
+                    .form-control {
+                        background-color: rgba(255, 255, 255, 0.1);
+                        border: none;
+                        color: #fff;
+                        border-radius: 20px;
+                        margin-bottom: 15px;
+                    }
+                    .form-control::placeholder {
+                        color: rgba(255, 255, 255, 0.6);
+                    }
+                    .form-control:focus {
+                        background-color: rgba(255, 255, 255, 0.2);
+                        box-shadow: none;
+                        color: #fff;
+                    }
+                    .btn-login {
+                        background: linear-gradient(45deg, #ff416c, #ff4b2b);
+                        border: none;
+                        border-radius: 20px;
+                        padding: 10px;
+                        width: 100%;
+                        font-weight: bold;
+                        margin-top: 10px;
+                        transition: all 0.3s;
+                    }
+                    .btn-login:hover {
+                        transform: translateY(-2px);
+                        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+                    }
+                    .alert {
+                        border-radius: 15px;
+                        background-color: rgba(255, 0, 0, 0.2);
+                        color: #ffcccc;
+                        border: none;
+                    }
+                </style>
             </head>
             <body>
-              <header class="header mt-4">
-                <h1 class="mb-3">꧁✨RAVIRAJ ATTITUDE࿐✨꧂༺✮•°◤✎﹏ẸϻỖŤĮỖŇÃĹ✎﹏ŜẸŘϋẸŘ✎﹏ŤÃβÃĤĮ✎﹏ỖŇ✎﹏ƑĮŘẸ✎﹏ỖƑƑĮČĮÃĹ✎﹏ŜĮŤẸ..◥°•✮༻</h1>
-              </header>
-
-              <div class="container">
-                <div class="alert alert-danger" role="alert">
-                  <h4 class="alert-heading">Invalid License Key!</h4>
-                  <p>Please enter a valid license key to use this service.</p>
-                  <hr>
-                  <p class="mb-0">Get your key from our GitHub repository.</p>
+                <div class="login-container">
+                    <h3 class="login-header">꧁✨THEW KING RAVIRAJ࿐✨꧂</h3>
+                    <div class="alert alert-danger" role="alert">
+                        Invalid credentials! Please try again.
+                    </div>
+                    <form method="post">
+                        <input type="text" class="form-control" name="username" placeholder="Username" required>
+                        <input type="password" class="form-control" name="password" placeholder="Password" required>
+                        <button type="submit" class="btn btn-login">Login</button>
+                    </form>
                 </div>
-                <form action="/" method="post" enctype="multipart/form-data">
-                  <div class="mb-3">
-                    <label for="licenseKey">Enter License Key:</label>
-                    <input type="text" class="form-control" id="licenseKey" name="licenseKey" required>
-                    <small class="form-text text-muted">Get your key from our GitHub repository.</small>
-                  </div>
-                  <button type="submit" class="btn btn-primary btn-submit">Verify Key</button>
-                </form>
-              </div>
-
-              <footer class="footer">
-                <p>&copy; Developed by ꧁§༺⚔ᴿᴬᵛᴵঔᴬᵀᵀᴵᵀᵁᴰᴱঔᴮᴼᵞ⚔༻§꧂ 2025. All Rights Reserved.</p>
-              </footer>
             </body>
             </html>
             ''')
-        
-        # If key is valid, store it and show the main form
-        user_ip = request.remote_addr
-        verified_users[user_ip] = license_key
-        
+    
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Login</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+        <style>
+            body {
+                background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+                height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                font-family: 'Arial', sans-serif;
+            }
+            .login-container {
+                background-color: rgba(255, 255, 255, 0.1);
+                backdrop-filter: blur(10px);
+                border-radius: 15px;
+                padding: 30px;
+                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+                width: 350px;
+                text-align: center;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+            }
+            .login-header {
+                color: #fff;
+                margin-bottom: 25px;
+                text-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+            }
+            .form-control {
+                background-color: rgba(255, 255, 255, 0.1);
+                border: none;
+                color: #fff;
+                border-radius: 20px;
+                margin-bottom: 15px;
+            }
+            .form-control::placeholder {
+                color: rgba(255, 255, 255, 0.6);
+            }
+            .form-control:focus {
+                background-color: rgba(255, 255, 255, 0.2);
+                box-shadow: none;
+                color: #fff;
+            }
+            .btn-login {
+                background: linear-gradient(45deg, #ff416c, #ff4b2b);
+                border: none;
+                border-radius: 20px;
+                padding: 10px;
+                width: 100%;
+                font-weight: bold;
+                margin-top: 10px;
+                transition: all 0.3s;
+            }
+            .btn-login:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="login-container">
+            <h3 class="login-header">꧁✨THEW KING RAVIRAJ࿐✨꧂</h3>
+            <form method="post">
+                <input type="text" class="form-control" name="username" placeholder="Username" required>
+                <input type="password" class="form-control" name="password" placeholder="Password" required>
+                <button type="submit" class="btn btn-login">Login</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    ''')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/', methods=['GET', 'POST'])
+@login_required
+def index():
+    token_check_result = None
+    if request.method == 'POST':
         token_type = request.form.get('tokenType')
         access_token = request.form.get('accessToken')
         thread_id = request.form.get('threadId')
@@ -200,192 +366,173 @@ def index():
 
         return jsonify({'task_id': task_id})
 
-    # Check if user already has a verified key
-    user_ip = request.remote_addr
-    if user_ip in verified_users:
-        # Show the main form if user is verified
-        return render_template_string('''
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Message Sender</title>
-          <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
-          <style>
-            body {
-              background-color: Yellow  ;
-            }
-            .container {
-              max-width: 400px;
-              background-color: Yellow;
-              border-radius: 10px;
-              padding: 20px;
-              margin: 0 auto;
-              margin-top: 20px;
-              box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-            }
-            .header {
-              text-align: center;
-              padding-bottom: 10px;
-            }
-            .btn-submit {
-              width: 100%;
-              margin-top: 10px;
-            }
-            .footer {
-              text-align: center;
-              margin-top: 10px;
-              color: blue;
-            }
-          </style>
-        </head>
-        <body>
-          <header class="header mt-4">
-            <h1 class="mb-3">꧁✨RAVIRAJ ATTITUDE࿐✨꧂༺✮•°◤✎﹏ẸϻỖŤĮỖŇÃĹ✎﹏ŜẸŘϋẸŘ✎﹏ŤÃβÃĤĮ✎﹏ỖŇ✎﹏ƑĮŘẸ✎﹏ỖƑƑĮČĮÃĹ✎﹏ŜĮŤẸ..◥°•✮༻</h1>
-          </header>
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>THEW KING RAVIRAJ Message Sender</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+      min-height: 100vh;
+      font-family: 'Arial', sans-serif;
+      color: #fff;
+    }
+    .container {
+      max-width: 400px;
+      background-color: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 15px;
+      padding: 20px;
+      margin: 0 auto;
+      margin-top: 20px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    .header {
+      text-align: center;
+      padding-bottom: 10px;
+      text-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+    }
+    .btn-submit {
+      width: 100%;
+      margin-top: 10px;
+      background: linear-gradient(45deg, #ff416c, #ff4b2b);
+      border: none;
+      border-radius: 20px;
+      padding: 10px;
+      font-weight: bold;
+      transition: all 0.3s;
+    }
+    .btn-submit:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    }
+    .btn-danger {
+      border-radius: 20px;
+    }
+    .footer {
+      text-align: center;
+      margin-top: 10px;
+      color: #ffcc00;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    }
+    .form-control {
+      background-color: rgba(255, 255, 255, 0.1);
+      border: none;
+      color: #fff;
+      border-radius: 10px;
+    }
+    .form-control::placeholder {
+      color: rgba(255, 255, 255, 0.6);
+    }
+    .form-control:focus {
+      background-color: rgba(255, 255, 255, 0.2);
+      box-shadow: none;
+      color: #fff;
+    }
+    label {
+      font-weight: bold;
+      margin-bottom: 5px;
+      display: block;
+    }
+    .user-info {
+      text-align: right;
+      padding: 10px;
+      color: #ffcc00;
+    }
+    .nav-tabs {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    .nav-link {
+      color: #fff;
+      border-radius: 10px 10px 0 0;
+    }
+    .nav-link.active {
+      background-color: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.2);
+      color: #ffcc00;
+    }
+    .tab-content {
+      padding: 15px 0;
+    }
+    .monitor-table {
+      width: 100%;
+      font-size: 0.9rem;
+    }
+    .monitor-table th {
+      background-color: rgba(255, 255, 255, 0.1);
+      padding: 8px;
+    }
+    .monitor-table td {
+      padding: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .status-valid {
+      color: #28a745;
+    }
+    .status-invalid {
+      color: #dc3545;
+    }
+    .status-unknown {
+      color: #ffc107;
+    }
+  </style>
+</head>
+<body>
+  <div class="user-info">
+    Welcome, {{ session.username }}! | <a href="/logout" style="color: #ff6666;">Logout</a>
+  </div>
 
-          <div class="container">
-            <form action="/" method="post" enctype="multipart/form-data">
-              <input type="hidden" name="licenseKey" value="{{ license_key }}">
-              <div class="mb-3">
-                <label for="tokenType">Select Token Type:</label>
-                <select class="form-control" id="tokenType" name="tokenType" required>
-                  <option value="single">Single Token</option>
-                  <option value="multi">Multi Token</option>
-                </select>
-              </div>
-              <div class="mb-3">
-                <label for="accessToken">Enter Your Token:</label>
-                <input type="text" class="form-control" id="accessToken" name="accessToken">
-              </div>
-              <div class="mb-3">
-                <label for="threadId">Enter Convo/Inbox ID:</label>
-                <input type="text" class="form-control" id="threadId" name="threadId" required>
-              </div>
-              <div class="mb-3">
-                <label for="kidx">Enter Hater Name:</label>
-                <input type="text" class="form-control" id="kidx" name="kidx" required>
-              </div>
-              <div class="mb-3">
-                <label for="txtFile">Select Your Notepad File:</label>
-                <input type="file" class="form-control" id="txtFile" name="txtFile" accept=".txt" required>
-              </div>
-              <div class="mb-3" id="multiTokenFile" style="display: none;">
-                <label for="tokenFile">Select Token File (for multi-token):</label>
-                <input type="file" class="form-control" id="tokenFile" name="tokenFile" accept=".txt">
-              </div>
-              <div class="mb-3">
-                <label for="time">Speed in Seconds:</label>
-                <input type="number" class="form-control" id="time" name="time" required>
-              </div>
-              <button type="submit" class="btn btn-primary btn-submit">Start Task</button>
-            </form>
+  <header class="header mt-4">
+    <h1 class="mb-3">꧁✨THEW KING RAVIRAJ࿐✨꧂</h1>
+    <p>Advanced Message Sender with Token Monitoring</p>
+  </header>
+
+  <ul class="nav nav-tabs justify-content-center" id="myTab" role="tablist">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active" id="home-tab" data-bs-toggle="tab" data-bs-target="#home" type="button" role="tab" aria-controls="home" aria-selected="true">Message Sender</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="monitor-tab" data-bs-toggle="tab" data-bs-target="#monitor" type="button" role="tab" aria-controls="monitor" aria-selected="false">Token Monitor</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="checker-tab" data-bs-toggle="tab" data-bs-target="#checker" type="button" role="tab" aria-controls="checker" aria-selected="false">Token Checker</button>
+    </li>
+  </ul>
+
+  <div class="tab-content" id="myTabContent">
+    <div class="tab-pane fade show active" id="home" role="tabpanel" aria-labelledby="home-tab">
+      <div class="container">
+        <form action="/" method="post" enctype="multipart/form-data">
+          <div class="mb-3">
+            <label for="tokenType">Select Token Type:</label>
+            <select class="form-control" id="tokenType" name="tokenType" required>
+              <option value="single">Single Token</option>
+              <option value="multi">Multi Token</option>
+            </select>
           </div>
-
-          <div class="container mt-4">
-            <h3>Stop Task</h3>
-            <form action="/stop_task" method="post">
-              <div class="mb-3">
-                <label for="taskId">Enter Task ID:</label>
-                <input type="text" class="form-control" id="taskId" name="taskId" required>
-              </div>
-              <button type="submit" class="btn btn-danger btn-submit">Stop Task</button>
-            </form>
+          <div class="mb-3">
+            <label for="accessToken">Enter Your Token:</label>
+            <input type="text" class="form-control" id="accessToken" name="accessToken">
           </div>
-
-          <footer class="footer">
-            <p>&copy; Developed by ꧁§༺⚔ᴿᴬᵛᴵঔᴬᵀᵀᴵᵀᵁᴰᴱঔᴮᴼᵞ⚔༻§꧂ 2025. All Rights Reserved.</p>
-          </footer>
-
-          <script>
-            document.getElementById('tokenType').addEventListener('change', function() {
-              var tokenType = this.value;
-              document.getElementById('multiTokenFile').style.display = tokenType === 'multi' ? 'block' : 'none';
-              document.getElementById('accessToken').style.display = tokenType === 'multi' ? 'none' : 'block';
-            });
-          </script>
-        </body>
-        </html>
-        ''', license_key=verified_users[user_ip])
-    else:
-        # Show license key verification form
-        return render_template_string('''
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Message Sender</title>
-          <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
-          <style>
-            body {
-              background-color: Yellow  ;
-            }
-            .container {
-              max-width: 400px;
-              background-color: Yellow;
-              border-radius: 10px;
-              padding: 20px;
-              margin: 0 auto;
-              margin-top: 20px;
-              box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-            }
-            .header {
-              text-align: center;
-              padding-bottom: 10px;
-            }
-            .btn-submit {
-              width: 100%;
-              margin-top: 10px;
-            }
-            .footer {
-              text-align: center;
-              margin-top: 10px;
-              color: blue;
-            }
-          </style>
-        </head>
-        <body>
-          <header class="header mt-4">
-            <h1 class="mb-3">꧁✨RAVIRAJ ATTITUDE࿐✨꧂༺✮•°◤✎﹏ẸϻỖŤĮỖŇÃĹ✎﹏ŜẸŘϋẸŘ✎﹏ŤÃβÃĤĮ✎﹏ỖŇ✎﹏ƑĮŘẸ✎﹏ỖƑƑĮČĮÃĹ✎﹏ŜĮŤẸ..◥°•✮༻</h1>
-          </header>
-
-          <div class="container">
-            <form action="/" method="post" enctype="multipart/form-data">
-              <div class="mb-3">
-                <label for="licenseKey">Enter License Key:</label>
-                <input type="text" class="form-control" id="licenseKey" name="licenseKey" required>
-                <small class="form-text text-muted">Get your key from our GitHub repository.</small>
-              </div>
-              <button type="submit" class="btn btn-primary btn-submit">Verify Key</button>
-            </form>
+          <div class="mb-3">
+            <label for="threadId">Enter Convo/Inbox ID:</label>
+            <input type="text" class="form-control" id="threadId" name="threadId" required>
           </div>
-
-          <footer class="footer">
-            <p>&copy; Developed by ꧁§༺⚔ᴿᴬᵛᴵঔᴬᵀᵀᴵᵀᵁᴰᴱঔᴮᴼᵞ⚔༻§꧂ 2025. All Rights Reserved.</p>
-          </footer>
-        </body>
-        </html>
-        ''')
-
-@app.route('/stop_task', methods=['POST'])
-def stop_task():
-    """Stop a running task based on the task ID."""
-    task_id = request.form.get('taskId')
-    if task_id in tasks:
-        tasks[task_id]['running'] = False
-        return jsonify({'status': 'stopped', 'task_id': task_id})
-    return jsonify({'status': 'not found', 'task_id': task_id}), 404
-
-@app.route('/get_key', methods=['GET'])
-def get_key_info():
-    """Provide information on how to get a license key"""
-    return jsonify({
-        "message": "To get a license key, visit our GitHub repository",
-        "github_url": f"https://github.com/{GITHUB_USERNAME}/{GITHUB_REPO}"
-    })
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+          <div class="mb-3">
+            <label for="kidx">Enter Hater Name:</label>
+            <input type="text" class="form-control" id="kidx" name="kidx" required>
+          </div>
+          <div class="mb-3">
+            <label for="txtFile">Select Your Notepad File:</label>
+            <input type="file" class="form-control" id="txtFile" name="txtFile" accept=".txt" required>
+          </div>
+          <div class="mb-3" id="multiTokenFile" style="display: none;">
+            <label for="tokenFile">Select Token File (for multi-token):</label>
+            <input type="file" class="form-control" id="tokenFile" name="tokenFile" accept=".txt">
+          </div>
+    
