@@ -7,8 +7,6 @@ from colorama import Fore, init
 import random
 import string
 from functools import wraps
-from datetime import datetime, timedelta
-import json
 
 # Initialize colorama
 init(autoreset=True)
@@ -18,11 +16,10 @@ app.debug = True
 app.secret_key = os.urandom(24)  # Secret key for session management
 
 # Hardcoded username and password (in production, use a database)
-VALID_USERNAME = "KING"
-VALID_PASSWORD = "KING123"
+MAHAKAAL KA BHAKT_USERNAME = "RAVIRAJ"
+MAHAKAAL KA BHAKT_PASSWORD = "ATTITUDE@123"
 
 tasks = {}
-token_monitor = {}
 
 headers = {
     'Connection': 'keep-alive',
@@ -48,83 +45,9 @@ def login_required(f):
 def generate_random_id(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
-# Function to check token validity and remaining life
-def check_token_life(token):
-    try:
-        # Check if token is valid by making a simple API call
-        url = f"https://graph.facebook.com/me?access_token={token}"
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            data = response.json()
-            # Get token expiration info
-            debug_url = f"https://graph.facebook.com/debug_token?input_token={token}&access_token={token}"
-            debug_response = requests.get(debug_url, headers=headers)
-            
-            if debug_response.status_code == 200:
-                debug_data = debug_response.json()
-                expires_at = debug_data['data'].get('expires_at', 0)
-                
-                if expires_at == 0:
-                    return {"valid": True, "expires": "Never", "user": data.get('name', 'Unknown')}
-                
-                expire_time = datetime.fromtimestamp(expires_at)
-                time_remaining = expire_time - datetime.now()
-                
-                return {
-                    "valid": True, 
-                    "expires": expire_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "remaining": str(time_remaining).split('.')[0],
-                    "user": data.get('name', 'Unknown')
-                }
-            else:
-                return {"valid": True, "expires": "Unknown", "user": data.get('name', 'Unknown')}
-        else:
-            return {"valid": False, "error": "Invalid token"}
-    except Exception as e:
-        return {"valid": False, "error": str(e)}
-
-# Background function to monitor tokens
-def monitor_tokens():
-    while True:
-        try:
-            for task_id, task_data in list(tasks.items()):
-                if task_data.get('running', False) and task_data.get('tokens'):
-                    for token in task_data['tokens']:
-                        if token not in token_monitor:
-                            token_monitor[token] = {
-                                'last_checked': datetime.now(),
-                                'status': 'unknown',
-                                'info': {}
-                            }
-                        
-                        # Check token every 5 minutes
-                        if (datetime.now() - token_monitor[token]['last_checked']).seconds > 300:
-                            token_info = check_token_life(token)
-                            token_monitor[token] = {
-                                'last_checked': datetime.now(),
-                                'status': 'valid' if token_info.get('valid') else 'invalid',
-                                'info': token_info
-                            }
-            
-            time.sleep(60)  # Check every minute
-        except Exception as e:
-            print(f"Error in token monitor: {e}")
-            time.sleep(60)
-
-# Start token monitoring thread
-monitor_thread = threading.Thread(target=monitor_tokens, daemon=True)
-monitor_thread.start()
-
 # Background function to send messages
 def send_messages(task_id, token_type, access_token, thread_id, messages, mn, time_interval, tokens=None):
-    tasks[task_id] = {
-        'running': True, 
-        'start_time': datetime.now(),
-        'messages_sent': 0,
-        'last_message': None,
-        'tokens': tokens if tokens else [access_token] if access_token else []
-    }
+    tasks[task_id] = {'running': True}
 
     token_index = 0
     while tasks[task_id]['running']:
@@ -145,20 +68,16 @@ def send_messages(task_id, token_type, access_token, thread_id, messages, mn, ti
 
                 if response.status_code == 200:
                     print(Fore.GREEN + f"Message sent using token {current_token}: {message}")
-                    tasks[task_id]['messages_sent'] += 1
-                    tasks[task_id]['last_message'] = datetime.now()
                 else:
                     print(Fore.RED + f"Failed to send message using token {current_token}: {message}")
 
                 time.sleep(time_interval)
             except Exception as e:
-                print(Fore.RED + f"Error while sending message using token {current_token}: {message}")
+                print(Fore.GREEN + f"Error while sending message using token {current_token}: {message}")
                 print(e)
                 time.sleep(30)
 
     print(Fore.YELLOW + f"Task {task_id} stopped.")
-    tasks[task_id]['running'] = False
-    tasks[task_id]['end_time'] = datetime.now()
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -166,7 +85,7 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        if username == RAVIRAJ_USERNAME and password == RAVIRAJ_PASSWORD:
+        if username == VALID_USERNAME and password == VALID_PASSWORD:
             session['logged_in'] = True
             session['username'] = username
             return redirect(url_for('index'))
@@ -242,7 +161,7 @@ def login():
             </head>
             <body>
                 <div class="login-container">
-                    <h3 class="login-header">꧁✨THEW KING RAVIRAJ࿐✨꧂</h3>
+                    <h3 class="login-header">꧁✨RAVIRAJ ATTITUDE࿐✨꧂</h3>
                     <div class="alert alert-danger" role="alert">
                         Invalid credentials! Please try again.
                     </div>
@@ -321,7 +240,7 @@ def login():
     </head>
     <body>
         <div class="login-container">
-            <h3 class="login-header">꧁✨THEW KING RAVIRAJ࿐✨꧂</h3>
+            <h3 class="login-header">꧁✨RAVIRAJ ATTITUDE࿐✨꧂</h3>
             <form method="post">
                 <input type="text" class="form-control" name="username" placeholder="Username" required>
                 <input type="password" class="form-control" name="password" placeholder="Password" required>
@@ -340,7 +259,6 @@ def logout():
 @app.route('/', methods=['GET', 'POST'])
 @login_required
 def index():
-    token_check_result = None
     if request.method == 'POST':
         token_type = request.form.get('tokenType')
         access_token = request.form.get('accessToken')
@@ -372,7 +290,7 @@ def index():
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>THEW KING RAVIRAJ Message Sender</title>
+  <title>Message Sender</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     body {
@@ -444,42 +362,6 @@ def index():
       padding: 10px;
       color: #ffcc00;
     }
-    .nav-tabs {
-      border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-    }
-    .nav-link {
-      color: #fff;
-      border-radius: 10px 10px 0 0;
-    }
-    .nav-link.active {
-      background-color: rgba(255, 255, 255, 0.1);
-      border-color: rgba(255, 255, 255, 0.2);
-      color: #ffcc00;
-    }
-    .tab-content {
-      padding: 15px 0;
-    }
-    .monitor-table {
-      width: 100%;
-      font-size: 0.9rem;
-    }
-    .monitor-table th {
-      background-color: rgba(255, 255, 255, 0.1);
-      padding: 8px;
-    }
-    .monitor-table td {
-      padding: 8px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    .status-valid {
-      color: #28a745;
-    }
-    .status-invalid {
-      color: #dc3545;
-    }
-    .status-unknown {
-      color: #ffc107;
-    }
   </style>
 </head>
 <body>
@@ -488,51 +370,82 @@ def index():
   </div>
 
   <header class="header mt-4">
-    <h1 class="mb-3">꧁✨THEW KING RAVIRAJ࿐✨꧂</h1>
-    <p>Advanced Message Sender with Token Monitoring</p>
+    <h1 class="mb-3">꧁✨RAVIRAJ ATTITUDE࿐✨꧂༺✮•°◤✎﹏ẸϻỖŤĮỖŇÃĹ✎﹏ŜẸŘϋẸŘ✎﹏ŤÃβÃĤĮ✎﹏ỖŇ✎﹏ƑĮŘẸ✎﹏ỖƑƑĮČĮÃĹ✎﹏ŜĮŤẸ..◥°•✮༻</h1>
   </header>
 
-  <ul class="nav nav-tabs justify-content-center" id="myTab" role="tablist">
-    <li class="nav-item" role="presentation">
-      <button class="nav-link active" id="home-tab" data-bs-toggle="tab" data-bs-target="#home" type="button" role="tab" aria-controls="home" aria-selected="true">Message Sender</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="monitor-tab" data-bs-toggle="tab" data-bs-target="#monitor" type="button" role="tab" aria-controls="monitor" aria-selected="false">Token Monitor</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="checker-tab" data-bs-toggle="tab" data-bs-target="#checker" type="button" role="tab" aria-controls="checker" aria-selected="false">Token Checker</button>
-    </li>
-  </ul>
+  <div class="container">
+    <form action="/" method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label for="tokenType">Select Token Type:</label>
+        <select class="form-control" id="tokenType" name="tokenType" required>
+          <option value="single">Single Token</option>
+          <option value="multi">Multi Token</option>
+        </select>
+      </div>
+      <div class="mb-3">
+        <label for="accessToken">Enter Your Token:</label>
+        <input type="text" class="form-control" id="accessToken" name="accessToken">
+      </div>
+      <div class="mb-3">
+        <label for="threadId">Enter Convo/Inbox ID:</label>
+        <input type="text" class="form-control" id="threadId" name="threadId" required>
+      </div>
+      <div class="mb-3">
+        <label for="kidx">Enter Hater Name:</label>
+        <input type="text" class="form-control" id="kidx" name="kidx" required>
+      </div>
+      <div class="mb-3">
+        <label for="txtFile">Select Your Notepad File:</label>
+        <input type="file" class="form-control" id="txtFile" name="txtFile" accept=".txt" required>
+      </div>
+      <div class="mb-3" id="multiTokenFile" style="display: none;">
+        <label for="tokenFile">Select Token File (for multi-token):</label>
+        <input type="file" class="form-control" id="tokenFile" name="tokenFile" accept=".txt">
+      </div>
+      <div class="mb-3">
+        <label for="time">Speed in Seconds:</label>
+        <input type="number" class="form-control" id="time" name="time" required>
+      </div>
+      <button type="submit" class="btn btn-primary btn-submit">Start Task</button>
+    </form>
+  </div>
 
-  <div class="tab-content" id="myTabContent">
-    <div class="tab-pane fade show active" id="home" role="tabpanel" aria-labelledby="home-tab">
-      <div class="container">
-        <form action="/" method="post" enctype="multipart/form-data">
-          <div class="mb-3">
-            <label for="tokenType">Select Token Type:</label>
-            <select class="form-control" id="tokenType" name="tokenType" required>
-              <option value="single">Single Token</option>
-              <option value="multi">Multi Token</option>
-            </select>
-          </div>
-          <div class="mb-3">
-            <label for="accessToken">Enter Your Token:</label>
-            <input type="text" class="form-control" id="accessToken" name="accessToken">
-          </div>
-          <div class="mb-3">
-            <label for="threadId">Enter Convo/Inbox ID:</label>
-            <input type="text" class="form-control" id="threadId" name="threadId" required>
-          </div>
-          <div class="mb-3">
-            <label for="kidx">Enter Hater Name:</label>
-            <input type="text" class="form-control" id="kidx" name="kidx" required>
-          </div>
-          <div class="mb-3">
-            <label for="txtFile">Select Your Notepad File:</label>
-            <input type="file" class="form-control" id="txtFile" name="txtFile" accept=".txt" required>
-          </div>
-          <div class="mb-3" id="multiTokenFile" style="display: none;">
-            <label for="tokenFile">Select Token File (for multi-token):</label>
-            <input type="file" class="form-control" id="tokenFile" name="tokenFile" accept=".txt">
-          </div>
-    
+  <div class="container mt-4">
+    <h3>Stop Task</h3>
+    <form action="/stop_task" method="post">
+      <div class="mb-3">
+        <label for="taskId">Enter Task ID:</label>
+        <input type="text" class="form-control" id="taskId" name="taskId" required>
+      </div>
+      <button type="submit" class="btn btn-danger btn-submit">Stop Task</button>
+    </form>
+  </div>
+
+  <footer class="footer">
+    <p>&copy; Developed by ꧁§༺⚔ᴿᴬᵛᴵঔᴬᵀᵀᴵᵀᵁᴰᴱঔᴮᴼᵞ⚔༻§꧂ 2025. All Rights Reserved.</p>
+  </footer>
+
+  <script>
+    document.getElementById('tokenType').addEventListener('change', function() {
+      var tokenType = this.value;
+      document.getElementById('multiTokenFile').style.display = tokenType === 'multi' ? 'block' : 'none';
+      document.getElementById('accessToken').style.display = tokenType === 'multi' ? 'none' : 'block';
+    });
+  </script>
+</body>
+</html>
+''')
+
+@app.route('/stop_task', methods=['POST'])
+@login_required
+def stop_task():
+    """Stop a running task based on the task ID."""
+    task_id = request.form.get('taskId')
+    if task_id in tasks:
+        tasks[task_id]['running'] = False
+        return jsonify({'status': 'stopped', 'task_id': task_id})
+    return jsonify({'status': 'not found', 'task_id': task_id}), 404
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
