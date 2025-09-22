@@ -16,8 +16,8 @@ app.debug = True
 app.secret_key = os.urandom(24)  # Secret key for session management
 
 # Hardcoded username and password (in production, use a database)
-MAHAKAAL KA BHAKT_USERNAME = "RAVIRAJ"
-MAHAKAAL KA BHAKT_PASSWORD = "ATTITUDE@123"
+VALID_USERNAME = "RAVIRAJ"
+VALID_PASSWORD = "ATTITUDE@123"
 
 tasks = {}
 
